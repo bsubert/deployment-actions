@@ -101,26 +101,36 @@ jobs:
           DO_NPM:        ${{ inputs.run_npm_build }}
         run: |
           set -euo pipefail
-          sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no \
-            "$SSH_USER@$TARGET_SERVER" \
-            REPO_SLUG="$REPO_SLUG" APP_TOKEN="$APP_TOKEN" \
-            BRANCH="$BRANCH" TARGET_PATH="$TARGET_PATH" \
-            DO_COMPOSER="$DO_COMPOSER" DO_NPM="$DO_NPM" \
-            'bash -s' <<'REMOTE'
-              set -xe
-              cd "$TARGET_PATH"
-              git checkout "$BRANCH"
-              git remote set-url origin \
-                "https://x-access-token:${APP_TOKEN}@github.com/${REPO_SLUG}.git"
-              git pull origin "$BRANCH" --rebase --autostash
-              if [ "$DO_COMPOSER" = "true" ]; then
-                composer install --no-interaction
-              fi
-              if [ "$DO_NPM" = "true" ]; then
-                npm install
-                npm run build
-              fi
+
+          REMOTE_SCRIPT=$(cat <<'REMOTE'
+          set -xe
+          cd "$TARGET_PATH"
+          git checkout "$BRANCH"
+          git remote set-url origin \
+            "https://x-access-token:${APP_TOKEN}@github.com/${REPO_SLUG}.git"
+          git pull origin "$BRANCH" --rebase --autostash
+          if [ "$DO_COMPOSER" = "true" ]; then
+            composer install --no-interaction
+          fi
+          if [ "$DO_NPM" = "true" ]; then
+            npm install
+            npm run build
+          fi
           REMOTE
+          )
+
+          PREAMBLE=$(printf 'export %s=%q\n' \
+            REPO_SLUG    "$REPO_SLUG" \
+            APP_TOKEN    "$APP_TOKEN" \
+            BRANCH       "$BRANCH" \
+            TARGET_PATH  "$TARGET_PATH" \
+            DO_COMPOSER  "$DO_COMPOSER" \
+            DO_NPM       "$DO_NPM")
+
+          printf '%s\n%s\n' "$PREAMBLE" "$REMOTE_SCRIPT" \
+            | sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no \
+                "$SSH_USER@$TARGET_SERVER" 'bash -s'
+
 
       - name: Compute duration
         if: always()
