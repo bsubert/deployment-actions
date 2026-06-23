@@ -28,7 +28,7 @@ Both workflows are defined with `on: workflow_call`, which means they can only b
 
 ### 1. Make sure the project has the required secrets
 
-Either set them as **organization secrets** (recommended — they apply to every repo automatically) or as repo secrets:
+Add these as **repository secrets** in every project repo (Settings → Secrets and variables → Actions). Organization secrets are not used here because the Free org plan does not allow private repos to read them — see [Secrets distribution](#secrets-distribution) below for a one‑command script that pushes them to every repo at once.
 
 | Secret | Required | Description |
 | --- | --- | --- |
@@ -63,7 +63,7 @@ on:
 
 jobs:
   call:
-    uses: bsubert/deployment-actions/.github/workflows/deploy.yml@v1
+    uses: your-org/workflow-templates/.github/workflows/deploy.yml@v1
     with:
       repo_slug: your-org/your-repo
       # Optional overrides — only set if non-default:
@@ -72,8 +72,19 @@ jobs:
       # dev_path: /html/dev
       # run_composer: true
       # run_npm_build: true
-    secrets: inherit
+    secrets:
+      SSH_USER:               ${{ secrets.SSH_USER }}
+      SSH_PASS:               ${{ secrets.SSH_PASS }}
+      PROD_SERVER:            ${{ secrets.PROD_SERVER }}
+      STAGE_SERVER:           ${{ secrets.STAGE_SERVER }}
+      DEV_SERVER:             ${{ secrets.DEV_SERVER }}
+      DEPLOY_APP_ID:          ${{ secrets.DEPLOY_APP_ID }}
+      DEPLOY_APP_PRIVATE_KEY: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+      SLACK_WEBHOOK_URL:      ${{ secrets.SLACK_WEBHOOK_URL }}
 ```
+
+> **Use the explicit `secrets:` block, not `secrets: inherit`.**
+> `inherit` only works when the caller and the reusable workflow live under the **same owner** (same user or same org). If your project repos are in one org and the workflow templates repo is under a different account, `inherit` silently forwards nothing and every required secret fails validation. Explicit forwarding works across owner boundaries and doubles as documentation of what the project actually depends on.
 
 ### 3. Add a caller workflow for content push
 
@@ -89,15 +100,19 @@ on:
 
 jobs:
   call:
-    uses: bsubert/deployment-actions/.github/workflows/content-push.yml@v1
+    uses: your-org/workflow-templates/.github/workflows/content-push.yml@v1
     with:
       repo_slug: your-org/your-repo
       branch: production
       # remote_path: /html/production
-    secrets: inherit
+    secrets:
+      SSH_USER:               ${{ secrets.SSH_USER }}
+      SSH_PASS:               ${{ secrets.SSH_PASS }}
+      PROD_SERVER:            ${{ secrets.PROD_SERVER }}
+      DEPLOY_APP_ID:          ${{ secrets.DEPLOY_APP_ID }}
+      DEPLOY_APP_PRIVATE_KEY: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+      SLACK_WEBHOOK_URL:      ${{ secrets.SLACK_WEBHOOK_URL }}
 ```
-
-`secrets: inherit` forwards every secret the caller repo has access to. If you'd rather be explicit, list each one under a `secrets:` block instead.
 
 That's all you need in the project repo — two files, no shared logic to maintain.
 
@@ -157,7 +172,7 @@ These workflows authenticate to GitHub using a **GitHub App installation token**
    - Copy the **App ID**.
    - Click **Generate a private key** and download the `.pem` file.
 6. Left sidebar → **Install App** → install on the org → choose the project repos that should be deployable.
-7. Add the two org secrets:
+7. Add `DEPLOY_APP_ID` and `DEPLOY_APP_PRIVATE_KEY` to each project repo (see [Secrets distribution](#secrets-distribution) for a bulk script):
    - `DEPLOY_APP_ID` = the numeric App ID
    - `DEPLOY_APP_PRIVATE_KEY` = the full contents of the `.pem` file (including the `-----BEGIN/END-----` lines)
 
@@ -187,12 +202,88 @@ The exact noreply email for the bot can be found at `https://api.github.com/user
 
 ---
 
+## Secrets distribution
+
+This org is on the **Free plan**, where organization secrets are not visible to private repositories. All secrets are therefore set per repo. To keep that bearable, use the bulk script in this repo.
+
+### Required per repo
+
+- `SSH_USER`, `SSH_PASS`
+- `PROD_SERVER` (+ `STAGE_SERVER` / `DEV_SERVER` for the deploy workflow)
+- `DEPLOY_APP_ID`, `DEPLOY_APP_PRIVATE_KEY`
+- `SLACK_WEBHOOK_URL`
+
+### Bulk‑set the deploy app secrets
+
+`scripts/sync-deploy-secrets.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Usage:
+#   export DEPLOY_APP_ID=123456
+#   export DEPLOY_APP_PRIVATE_KEY_FILE=~/secrets/acme-deploy-bot.private-key.pem
+#   ./scripts/sync-deploy-secrets.sh your-org/repo-a your-org/repo-b ...
+
+: "${DEPLOY_APP_ID:?set DEPLOY_APP_ID}"
+: "${DEPLOY_APP_PRIVATE_KEY_FILE:?set DEPLOY_APP_PRIVATE_KEY_FILE to the .pem path}"
+
+if [ "$#" -eq 0 ]; then
+  echo "Pass one or more owner/repo arguments." >&2
+  exit 1
+fi
+
+for repo in "$@"; do
+  echo ">> $repo"
+  gh secret set DEPLOY_APP_ID          --repo "$repo" --body "$DEPLOY_APP_ID"
+  gh secret set DEPLOY_APP_PRIVATE_KEY --repo "$repo" < "$DEPLOY_APP_PRIVATE_KEY_FILE"
+done
+```
+
+Run it (after `gh auth login`):
+
+```bash
+export DEPLOY_APP_ID=345678
+export DEPLOY_APP_PRIVATE_KEY_FILE=~/keys/acme-deploy-bot.private-key.pem
+
+./scripts/sync-deploy-secrets.sh \
+  your-org/repo-a \
+  your-org/repo-b \
+  your-org/repo-c
+```
+
+Or keep the repo list in a file and pipe it in:
+
+```bash
+xargs -a scripts/deploy-repos.txt ./scripts/sync-deploy-secrets.sh
+```
+
+### Rotating the private key
+
+1. Generate a new private key on the GitHub App's settings page.
+2. Re-run `sync-deploy-secrets.sh` with the new `.pem`.
+3. Delete the old key on the App settings page.
+
+No code changes, no per‑repo clicking.
+
+### Why not org secrets
+
+GitHub's Free org plan limits organization secrets to public repos. The two paid alternatives are:
+
+- **Upgrade to Team** (~$4/user/month) — unlocks org secrets for private repos.
+- **Use a GitHub Environment** per repo — same per‑repo cost as repo secrets, but adds approval gates if you want them.
+
+For a small fleet, the bulk script above is the simplest path and keeps the App rotation story to a single command.
+
+---
+
 ## Versioning
 
 Callers pin to a tag, not a branch:
 
 ```yaml
-uses: bsubert/deployment-actions/.github/workflows/deploy.yml@v1
+uses: your-org/workflow-templates/.github/workflows/deploy.yml@v1
 ```
 
 Release rules used here:
@@ -220,9 +311,11 @@ Without this, callers in other repos will fail with a 404 when resolving `uses:`
 
 - Edit on a feature branch, open a PR against `main`.
 - Test the change end‑to‑end by pointing a sandbox project's caller at the feature branch:
+
   ```yaml
-  uses: bsubert/deployment-actions/.github/workflows/deploy.yml@my-feature
+  uses: your-org/workflow-templates/.github/workflows/deploy.yml@my-feature
   ```
+
 - After merge, move the appropriate major tag (`git tag -f v1 && git push -f origin v1`) so all callers pick up the change on their next run.
 - For breaking changes, cut a new major instead of force‑moving the existing one.
 
@@ -239,8 +332,14 @@ The app is installed, but not on this specific repo. Org → Settings → GitHub
 **`fatal: unable to access ... The requested URL returned error: 403`** during a workflow file push  
 Grant **Workflows: write** to the app.
 
-**Caller fails with `workflow was not found`**  
-Either the tag (`@v1`) doesn't exist on this repo, or access for other repos in the org hasn't been enabled (see *Access from other repos* above).
+**Caller fails with `workflow was not found` or "reference … is not a valid branch, tag, or commit"**  
+Either the tag (`@v1`) doesn't exist on this repo (note: `@v1` does **not** auto‑resolve to `v1.0.0` — you have to create the `v1` alias explicitly, see *Versioning*), or access for other repos in the org hasn't been enabled (see *Access from other repos* above).
+
+**Caller fails with `Secret X is required, but not provided while calling`**  
+The reusable workflow declares `X` as `required: true` but the caller isn't forwarding it. Two common causes: (1) you used `secrets: inherit` but the caller and the template are under different owners — switch to explicit forwarding; (2) the secret isn't actually set on the caller repo — verify with `gh secret list --repo owner/repo`.
+
+**Remote shell fails with `syntax error near unexpected token '('` (or similar)**  
+Caused by passing values to `ssh user@host VAR=... 'bash -s'` unquoted — special characters in inputs like the commit message break the remote shell's parsing. The workflows in this repo avoid this by building the script with a quoted heredoc and piping it to ssh on stdin, with values exported via `printf '%q'`. If you fork the workflow, keep that pattern.
 
 **Secrets show up as empty in the called workflow**  
 The caller is missing `secrets: inherit` (or an explicit `secrets:` block listing each one). Reusable workflows don't automatically see the caller's secrets.
