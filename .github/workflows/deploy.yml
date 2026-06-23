@@ -134,7 +134,7 @@ jobs:
             BRANCH       "$BRANCH" \
             TARGET_PATH  "$TARGET_PATH" \
             DO_COMPOSER  "$DO_COMPOSER" \
-            DO_NPM       "$DO_NPM") \
+            DO_NPM       "$DO_NPM" \
             DO_NPM_PROD  "$DO_NPM_PROD")
 
           printf '%s\n%s\n' "$PREAMBLE" "$REMOTE_SCRIPT" \
