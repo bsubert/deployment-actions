@@ -63,7 +63,7 @@ on:
 
 jobs:
   call:
-    uses: your-org/workflow-templates/.github/workflows/deploy.yml@v1
+    uses: bsubert/deployment-actions/.github/workflows/deploy.yml@v1
     with:
       repo_slug: your-org/your-repo
       # Optional overrides — only set if non-default:
@@ -89,7 +89,7 @@ on:
 
 jobs:
   call:
-    uses: your-org/workflow-templates/.github/workflows/content-push.yml@v1
+    uses: bsubert/deployment-actions/.github/workflows/content-push.yml@v1
     with:
       repo_slug: your-org/your-repo
       branch: production
@@ -192,7 +192,7 @@ The exact noreply email for the bot can be found at `https://api.github.com/user
 Callers pin to a tag, not a branch:
 
 ```yaml
-uses: your-org/workflow-templates/.github/workflows/deploy.yml@v1
+uses: bsubert/deployment-actions/.github/workflows/deploy.yml@v1
 ```
 
 Release rules used here:
@@ -221,7 +221,7 @@ Without this, callers in other repos will fail with a 404 when resolving `uses:`
 - Edit on a feature branch, open a PR against `main`.
 - Test the change end‑to‑end by pointing a sandbox project's caller at the feature branch:
   ```yaml
-  uses: your-org/workflow-templates/.github/workflows/deploy.yml@my-feature
+  uses: bsubert/deployment-actions/.github/workflows/deploy.yml@my-feature
   ```
 - After merge, move the appropriate major tag (`git tag -f v1 && git push -f origin v1`) so all callers pick up the change on their next run.
 - For breaking changes, cut a new major instead of force‑moving the existing one.
