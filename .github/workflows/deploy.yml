@@ -31,6 +31,10 @@ on:
         required: false
         type: boolean
         default: true
+      run_npm_production:
+        required: false
+        type: boolean
+        default: false
     secrets:
       SSH_USER:               { required: true }
       SSH_PASS:               { required: true }
@@ -99,6 +103,7 @@ jobs:
           APP_TOKEN:     ${{ steps.app_token.outputs.token }}
           DO_COMPOSER:   ${{ inputs.run_composer }}
           DO_NPM:        ${{ inputs.run_npm_build }}
+          DO_NPM_PROD:   ${{ inputs.run_npm_production }}
         run: |
           set -euo pipefail
 
@@ -116,6 +121,10 @@ jobs:
             npm install
             npm run build
           fi
+          if [ "$DO_NPM_PROD" = "true" ]; then
+            npm install
+            npm run production
+          fi
           REMOTE
           )
 
@@ -125,7 +134,8 @@ jobs:
             BRANCH       "$BRANCH" \
             TARGET_PATH  "$TARGET_PATH" \
             DO_COMPOSER  "$DO_COMPOSER" \
-            DO_NPM       "$DO_NPM")
+            DO_NPM       "$DO_NPM") \
+            DO_NPM_PROD  "$DO_NPM_PROD")
 
           printf '%s\n%s\n' "$PREAMBLE" "$REMOTE_SCRIPT" \
             | sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no \

@@ -28,6 +28,10 @@ on:
         required: false
         type: boolean
         default: true
+      run_npm_production:
+        required: false
+        type: boolean
+        default: false
       commit_message:
         required: false
         type: string
@@ -73,6 +77,7 @@ jobs:
           COMMIT_MESSAGE: ${{ inputs.commit_message }}
           DO_COMPOSER:    ${{ inputs.run_composer }}
           DO_NPM:         ${{ inputs.run_npm_build }}
+          DO_NPM_PROD:    ${{ inputs.run_npm_production }}
         run: |
           set -euo pipefail
 
@@ -104,6 +109,10 @@ jobs:
           if [ "$DO_NPM" = "true" ]; then
             npm install
             npm run build
+          fi
+          if [ "$DO_NPM_PROD" = "true" ]; then
+            npm install
+            npm run production
           fi
           REMOTE
           )
