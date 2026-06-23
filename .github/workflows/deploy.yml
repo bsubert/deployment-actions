@@ -4,11 +4,10 @@ on:
   workflow_call:
     inputs:
       repo_slug:
-        description: "owner/repo used in the remote URL on the server"
+        description: "owner/repo used in the git remote URL on the server"
         required: true
         type: string
       prod_path:
-        description: "Absolute path on the prod server"
         required: false
         type: string
         default: "/html/production"
@@ -33,65 +32,78 @@ on:
         type: boolean
         default: true
     secrets:
-      SSH_USER:          { required: true }
-      SSH_PASS:          { required: true }
-      PROD_SERVER:       { required: false }
-      STAGE_SERVER:      { required: false }
-      DEV_SERVER:        { required: false }
-      GIT_USER:          { required: true }
-      GIT_TOKEN:         { required: true }
-      SLACK_WEBHOOK_URL: { required: true }
+      SSH_USER:               { required: true }
+      SSH_PASS:               { required: true }
+      PROD_SERVER:            { required: false }
+      STAGE_SERVER:           { required: false }
+      DEV_SERVER:             { required: false }
+      DEPLOY_APP_ID:          { required: true }
+      DEPLOY_APP_PRIVATE_KEY: { required: true }
+      SLACK_WEBHOOK_URL:      { required: true }
 
 jobs:
   deploy:
     runs-on: ${{ inputs.runs_on }}
-    env:
-      SSH_USER:    ${{ secrets.SSH_USER }}
-      SSH_PASS:    ${{ secrets.SSH_PASS }}
-      PROD_SERVER: ${{ secrets.PROD_SERVER }}
-      STAGE_SERVER: ${{ secrets.STAGE_SERVER }}
-      DEV_SERVER:  ${{ secrets.DEV_SERVER }}
-      GIT_USER:    ${{ secrets.GIT_USER }}
-      GIT_TOKEN:   ${{ secrets.GIT_TOKEN }}
-      REPO_SLUG:   ${{ inputs.repo_slug }}
-      PROD_PATH:   ${{ inputs.prod_path }}
-      STAGE_PATH:  ${{ inputs.stage_path }}
-      DEV_PATH:    ${{ inputs.dev_path }}
-      DO_COMPOSER: ${{ inputs.run_composer }}
-      DO_NPM:      ${{ inputs.run_npm_build }}
 
     steps:
       - name: Set start time
         run: echo "START_TIME=$(date +%s)" >> "$GITHUB_ENV"
 
+      - name: Mint GitHub App token
+        id: app_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
       - name: Resolve target
         id: target
+        env:
+          PROD_SERVER:  ${{ secrets.PROD_SERVER }}
+          STAGE_SERVER: ${{ secrets.STAGE_SERVER }}
+          DEV_SERVER:   ${{ secrets.DEV_SERVER }}
+          PROD_PATH:    ${{ inputs.prod_path }}
+          STAGE_PATH:   ${{ inputs.stage_path }}
+          DEV_PATH:     ${{ inputs.dev_path }}
         run: |
           BRANCH="${GITHUB_REF##*/}"
           case "$BRANCH" in
-            production) echo "server=$PROD_SERVER"  >> "$GITHUB_OUTPUT"
-                        echo "path=$PROD_PATH"     >> "$GITHUB_OUTPUT"
-                        echo "env_name=Production" >> "$GITHUB_ENV" ;;
-            staging)    echo "server=$STAGE_SERVER" >> "$GITHUB_OUTPUT"
-                        echo "path=$STAGE_PATH"    >> "$GITHUB_OUTPUT"
-                        echo "env_name=Staging"    >> "$GITHUB_ENV" ;;
-            dev)        echo "server=$DEV_SERVER"  >> "$GITHUB_OUTPUT"
-                        echo "path=$DEV_PATH"      >> "$GITHUB_OUTPUT"
-                        echo "env_name=Development" >> "$GITHUB_ENV" ;;
-            *) echo "Branch $BRANCH not deployable"; exit 0 ;;
+            production)
+              echo "server=$PROD_SERVER"   >> "$GITHUB_OUTPUT"
+              echo "path=$PROD_PATH"       >> "$GITHUB_OUTPUT"
+              echo "ENV_NAME=Production"   >> "$GITHUB_ENV" ;;
+            staging)
+              echo "server=$STAGE_SERVER"  >> "$GITHUB_OUTPUT"
+              echo "path=$STAGE_PATH"      >> "$GITHUB_OUTPUT"
+              echo "ENV_NAME=Staging"      >> "$GITHUB_ENV" ;;
+            dev)
+              echo "server=$DEV_SERVER"    >> "$GITHUB_OUTPUT"
+              echo "path=$DEV_PATH"        >> "$GITHUB_OUTPUT"
+              echo "ENV_NAME=Development"  >> "$GITHUB_ENV" ;;
+            *)
+              echo "Branch $BRANCH is not deployable; aborting."
+              exit 1 ;;
           esac
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
       - name: Deploy via SSH
         env:
+          SSH_USER:      ${{ secrets.SSH_USER }}
+          SSH_PASS:      ${{ secrets.SSH_PASS }}
           TARGET_SERVER: ${{ steps.target.outputs.server }}
           TARGET_PATH:   ${{ steps.target.outputs.path }}
           BRANCH:        ${{ steps.target.outputs.branch }}
+          REPO_SLUG:     ${{ inputs.repo_slug }}
+          APP_TOKEN:     ${{ steps.app_token.outputs.token }}
+          DO_COMPOSER:   ${{ inputs.run_composer }}
+          DO_NPM:        ${{ inputs.run_npm_build }}
         run: |
           set -euo pipefail
           sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no \
             "$SSH_USER@$TARGET_SERVER" \
-            REPO_SLUG="$REPO_SLUG" GIT_USER="$GIT_USER" GIT_TOKEN="$GIT_TOKEN" \
+            REPO_SLUG="$REPO_SLUG" APP_TOKEN="$APP_TOKEN" \
             BRANCH="$BRANCH" TARGET_PATH="$TARGET_PATH" \
             DO_COMPOSER="$DO_COMPOSER" DO_NPM="$DO_NPM" \
             'bash -s' <<'REMOTE'
@@ -101,7 +113,9 @@ jobs:
               git remote set-url origin \
                 "https://x-access-token:${APP_TOKEN}@github.com/${REPO_SLUG}.git"
               git pull origin "$BRANCH" --rebase --autostash
-              [ "$DO_COMPOSER" = "true" ] && composer install --no-interaction
+              if [ "$DO_COMPOSER" = "true" ]; then
+                composer install --no-interaction
+              fi
               if [ "$DO_NPM" = "true" ]; then
                 npm install
                 npm run build
@@ -114,8 +128,11 @@ jobs:
           END_TIME=$(date +%s)
           DURATION=$((END_TIME - START_TIME))
           M=$((DURATION / 60)); S=$((DURATION % 60))
-          [ "$M" -gt 0 ] && TOOK="${M}m ${S}s" || TOOK="${S}s"
-          echo "TOOK=$TOOK" >> "$GITHUB_ENV"
+          if [ "$M" -gt 0 ]; then
+            echo "TOOK=${M}m ${S}s" >> "$GITHUB_ENV"
+          else
+            echo "TOOK=${S}s" >> "$GITHUB_ENV"
+          fi
 
       - name: Slack Notify on Success
         if: success()
@@ -127,7 +144,7 @@ jobs:
             {
               "attachments": [{
                 "color": "#2eb886",
-                "title": ":rocket: Deployment to ${{ env.env_name }} Succeeded",
+                "title": ":rocket: Deployment to ${{ env.ENV_NAME }} Succeeded",
                 "text": "✅ *${{ github.repository }}* deployed from *${{ github.ref_name }}*\nCommit: `${{ github.sha }}`\nActor: `${{ github.actor }}`\n⏱ Took: *${{ env.TOOK }}*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Logs>",
                 "footer": "GitHub Actions • Deployment Bot"
               }]
@@ -145,7 +162,7 @@ jobs:
             {
               "attachments": [{
                 "color": "danger",
-                "title": ":x: Deployment to ${{ env.env_name }} Failed",
+                "title": ":x: Deployment to ${{ env.ENV_NAME }} Failed",
                 "text": "❌ *${{ github.repository }}* failed deploying from *${{ github.ref_name }}*\nCommit: `${{ github.sha }}`\nActor: `${{ github.actor }}`\n⏱ Took: *${{ env.TOOK }}*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Logs>",
                 "footer": "GitHub Actions • Deployment Bot"
               }]

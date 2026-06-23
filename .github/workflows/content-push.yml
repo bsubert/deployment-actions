@@ -4,6 +4,7 @@ on:
   workflow_call:
     inputs:
       repo_slug:
+        description: "owner/repo used in the git remote URL on the server"
         required: true
         type: string
       branch:
@@ -27,41 +28,59 @@ on:
         required: false
         type: boolean
         default: true
+      commit_message:
+        required: false
+        type: string
+        default: "chore(content): sync from server [skip ci]"
     secrets:
-      SSH_USER:          { required: true }
-      SSH_PASS:          { required: true }
-      PROD_SERVER:       { required: true }
-      GIT_USER:          { required: true }
-      GIT_TOKEN:         { required: true }
-      SLACK_WEBHOOK_URL: { required: true }
+      SSH_USER:               { required: true }
+      SSH_PASS:               { required: true }
+      PROD_SERVER:            { required: true }
+      DEPLOY_APP_ID:          { required: true }
+      DEPLOY_APP_PRIVATE_KEY: { required: true }
+      SLACK_WEBHOOK_URL:      { required: true }
 
 jobs:
   push:
     runs-on: ${{ inputs.runs_on }}
     env:
-      SSH_USER:    ${{ secrets.SSH_USER }}
-      SSH_PASS:    ${{ secrets.SSH_PASS }}
-      PROD_SERVER: ${{ secrets.PROD_SERVER }}
-      GIT_USER:    ${{ secrets.GIT_USER }}
-      GIT_TOKEN:   ${{ secrets.GIT_TOKEN }}
-      REPO_SLUG:   ${{ inputs.repo_slug }}
-      BRANCH:      ${{ inputs.branch }}
-      REMOTE_PATH: ${{ inputs.remote_path }}
-      DO_COMPOSER: ${{ inputs.run_composer }}
-      DO_NPM:      ${{ inputs.run_npm_build }}
-      ENV_NAME:    Production
+      ENV_NAME: Production
 
     steps:
       - name: Set start time
         run: echo "START_TIME=$(date +%s)" >> "$GITHUB_ENV"
 
+      - name: Mint GitHub App token
+        id: app_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
       - name: Push server content to Git, then redeploy
+        env:
+          SSH_USER:       ${{ secrets.SSH_USER }}
+          SSH_PASS:       ${{ secrets.SSH_PASS }}
+          PROD_SERVER:    ${{ secrets.PROD_SERVER }}
+          REPO_SLUG:      ${{ inputs.repo_slug }}
+          BRANCH:         ${{ inputs.branch }}
+          REMOTE_PATH:    ${{ inputs.remote_path }}
+          APP_TOKEN:      ${{ steps.app_token.outputs.token }}
+          APP_ID:         ${{ secrets.DEPLOY_APP_ID }}
+          APP_SLUG:       ${{ steps.app_token.outputs.app-slug }}
+          COMMIT_MESSAGE: ${{ inputs.commit_message }}
+          DO_COMPOSER:    ${{ inputs.run_composer }}
+          DO_NPM:         ${{ inputs.run_npm_build }}
         run: |
           set -euo pipefail
           sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no \
             "$SSH_USER@$PROD_SERVER" \
-            REPO_SLUG="$REPO_SLUG" GIT_USER="$GIT_USER" GIT_TOKEN="$GIT_TOKEN" \
+            REPO_SLUG="$REPO_SLUG" APP_TOKEN="$APP_TOKEN" \
+            APP_ID="$APP_ID" APP_SLUG="$APP_SLUG" \
             BRANCH="$BRANCH" REMOTE_PATH="$REMOTE_PATH" \
+            COMMIT_MESSAGE="$COMMIT_MESSAGE" \
             DO_COMPOSER="$DO_COMPOSER" DO_NPM="$DO_NPM" \
             'bash -s' <<'REMOTE'
               set -xe
@@ -73,16 +92,18 @@ jobs:
               # Stage any server-side changes first so they aren't lost
               git add -A
               if ! git diff --cached --quiet; then
-                git -c user.email="actions@github.com" \
-                    -c user.name="Content Push Bot" \
-                    commit -m "chore(content): sync from server [skip ci]"
+                git -c user.name="${APP_SLUG}[bot]" \
+                    -c user.email="${APP_ID}+${APP_SLUG}[bot]@users.noreply.github.com" \
+                    commit -m "$COMMIT_MESSAGE"
               fi
 
-              # Reconcile with remote (server changes win on conflict)
+              # Reconcile with remote; server changes win on conflict
               git pull --rebase -X ours origin "$BRANCH" || true
               git push origin "$BRANCH"
 
-              [ "$DO_COMPOSER" = "true" ] && composer install --no-interaction
+              if [ "$DO_COMPOSER" = "true" ]; then
+                composer install --no-interaction
+              fi
               if [ "$DO_NPM" = "true" ]; then
                 npm install
                 npm run build
@@ -92,10 +113,14 @@ jobs:
       - name: Compute duration
         if: always()
         run: |
-          END_TIME=$(date +%s); DURATION=$((END_TIME - START_TIME))
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
           M=$((DURATION / 60)); S=$((DURATION % 60))
-          [ "$M" -gt 0 ] && TOOK="${M}m ${S}s" || TOOK="${S}s"
-          echo "TOOK=$TOOK" >> "$GITHUB_ENV"
+          if [ "$M" -gt 0 ]; then
+            echo "TOOK=${M}m ${S}s" >> "$GITHUB_ENV"
+          else
+            echo "TOOK=${S}s" >> "$GITHUB_ENV"
+          fi
 
       - name: Slack Notify on Success
         if: success()
@@ -108,7 +133,7 @@ jobs:
               "attachments": [{
                 "color": "#2eb886",
                 "title": ":arrows_counterclockwise: Content push to ${{ env.ENV_NAME }} Succeeded",
-                "text": "✅ *${{ github.repository }}* synced from server on *${{ env.BRANCH }}*\n⏱ Took: *${{ env.TOOK }}*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Logs>",
+                "text": "✅ *${{ github.repository }}* synced from server on *${{ inputs.branch }}*\n⏱ Took: *${{ env.TOOK }}*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Logs>",
                 "footer": "GitHub Actions • Content Bot"
               }]
             }
@@ -126,7 +151,7 @@ jobs:
               "attachments": [{
                 "color": "danger",
                 "title": ":x: Content Push to ${{ env.ENV_NAME }} Failed",
-                "text": "❌ *${{ github.repository }}* content push failed on *${{ env.BRANCH }}*\n⏱ Took: *${{ env.TOOK }}*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Logs>",
+                "text": "❌ *${{ github.repository }}* content push failed on *${{ inputs.branch }}*\n⏱ Took: *${{ env.TOOK }}*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Logs>",
                 "footer": "GitHub Actions • Content Bot"
               }]
             }
